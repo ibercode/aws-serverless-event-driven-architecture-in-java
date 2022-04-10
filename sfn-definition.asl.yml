@@ -1,0 +1,84 @@
+Comment: A description of my state machine
+StartAt: PaymentService
+States:
+  PaymentService:
+    Type: Task
+    Resource: arn:aws:states:::lambda:invoke
+    Parameters:
+      Payload.$: $
+      FunctionName: ${PaymentService}
+    Retry:
+      - ErrorEquals:
+          - Lambda.ServiceException
+          - Lambda.AWSLambdaException
+          - Lambda.SdkClientException
+        IntervalSeconds: 2
+        MaxAttempts: 6
+        BackoffRate: 2
+    ResultPath: null
+    OutputPath: $.detail
+    Next: InventoryService
+    Catch:
+      - ErrorEquals:
+          - States.ALL
+        Next: CompensationService
+        ResultPath: $.Payload
+  CompensationService:
+    Type: Task
+    Resource: arn:aws:states:::lambda:invoke
+    Parameters:
+      Payload.$: $
+      FunctionName: ${CompensationService}
+    Retry:
+      - ErrorEquals:
+          - Lambda.ServiceException
+          - Lambda.AWSLambdaException
+          - Lambda.SdkClientException
+        IntervalSeconds: 2
+        MaxAttempts: 6
+        BackoffRate: 2
+    Next: CancelOrder
+    InputPath: $.detail
+    OutputPath: $.Payload
+  CancelOrder:
+    Type: Task
+    Resource: arn:aws:states:::events:putEvents
+    Parameters:
+      Entries:
+        - Detail:
+            data.$: $.data
+            metadata.$: $.metadata
+          DetailType: orderCancellation
+          EventBusName: OrdersEventBus
+          Source: com.ibercode.orders
+    End: true
+  InventoryService:
+    Type: Task
+    Resource: arn:aws:states:::lambda:invoke
+    Parameters:
+      Payload.$: $
+      FunctionName: ${InventoryService}
+    Retry:
+      - ErrorEquals:
+          - Lambda.ServiceException
+          - Lambda.AWSLambdaException
+          - Lambda.SdkClientException
+        IntervalSeconds: 2
+        MaxAttempts: 6
+        BackoffRate: 2
+    Next: FulfillOrder
+    ResultSelector:
+      data.$: $.Payload.data
+      metadata.$: $.Payload.metadata
+  FulfillOrder:
+    Type: Task
+    Resource: arn:aws:states:::events:putEvents
+    Parameters:
+      Entries:
+        - Detail:
+            data.$: $.data
+            metadata.$: $.metadata
+          DetailType: orderFulfillment
+          EventBusName: OrdersEventBus
+          Source: com.ibercode.orders
+    End: true

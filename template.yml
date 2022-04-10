@@ -1,0 +1,186 @@
+AWSTemplateFormatVersion: 2010-09-09
+Transform: AWS::Serverless-2016-10-31
+Description: eda-serverless
+
+Globals:
+  Function:
+    Runtime: java11
+    MemorySize: 3072
+    Timeout: 25
+
+Resources:
+
+### Lambda Functions
+  OrderService:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: OrderService
+      Handler: com.ibercode.orderService.OrderService::handleRequest
+      CodeUri: target/sourceCode.zip
+      Policies:
+        - EventBridgePutEventsPolicy:
+            EventBusName: !Ref OrdersEventBus
+
+  PaymentService:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: PaymentService
+      Handler: com.ibercode.paymentService.PaymentService::handleRequest
+      CodeUri: target/sourceCode.zip
+
+  InventoryService:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: InventoryService
+      Handler: com.ibercode.inventoryService.InventoryService::handleRequest
+      CodeUri: target/sourceCode.zip
+
+  FulfillmentService:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: FulfillmentService
+      Handler: com.ibercode.fulfillment.FulfillmentService::handleRequest
+      CodeUri: target/sourceCode.zip
+      Environment:
+        Variables:
+          TOPIC_ARN: !Ref OrdersSNS
+      Policies:
+        - SNSPublishMessagePolicy:
+            TopicName: !GetAtt OrdersSNS.TopicName
+
+  CompensationService:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: CompensationService
+      Handler: com.ibercode.compensationService.CompensationService::handleRequest
+      CodeUri: target/sourceCode.zip
+
+  OrderCancellationService:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: OrderCancellationService
+      Handler: com.ibercode.orderCancellationService.OrderCancellationService::handleRequest
+      CodeUri: target/sourceCode.zip
+      Environment:
+        Variables:
+          TOPIC_ARN: !Ref OrdersSNS
+      Policies:
+        - SNSPublishMessagePolicy:
+            TopicName: !GetAtt OrdersSNS.TopicName
+
+### EventBridge
+  OrdersEventBus:
+    Type: AWS::Events::EventBus
+    Properties:
+      Name: OrdersEventBus
+
+  OrderServiceEventRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: OrderServiceEventRule
+      EventBusName: !GetAtt OrdersEventBus.Arn
+      EventPattern:
+        source:
+          - "com.ibercode.orders"
+        detail-type:
+          - "orderCreated"
+      Targets:
+        - Arn: !GetAtt PaymentStateMachine.Arn
+          Id: "OrderServiceEventRule"
+          RoleArn: !GetAtt EventBridgeIAMrole.Arn
+
+  FulfillmentEventRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: FulfillmentEventRule
+      EventBusName: !GetAtt OrdersEventBus.Arn
+      EventPattern:
+        source:
+          - "com.ibercode.orders"
+        detail-type:
+          - "orderFulfillment"
+      Targets:
+        - Arn: !GetAtt FulfillmentService.Arn
+          Id: "FulfillOrder"
+
+  CancelOrderEventRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: CancelOrderEventRule
+      EventBusName: !GetAtt OrdersEventBus.Arn
+      EventPattern:
+        source:
+          - "com.ibercode.orders"
+        detail-type:
+          - "orderCancellation"
+      Targets:
+        - Arn: !GetAtt OrderCancellationService.Arn
+          Id: "CancelOrder"
+
+### Step Functions
+  PaymentStateMachine:
+    Type: AWS::Serverless::StateMachine
+    Properties:
+      DefinitionUri: sfn-definition.asl.yml
+      DefinitionSubstitutions:
+        PaymentService: !GetAtt PaymentService.Arn
+        InventoryService: !GetAtt InventoryService.Arn
+        CompensationService: !GetAtt CompensationService.Arn
+      Name: PaymentStateMachine
+      Policies:
+        - Version: "2012-10-17"
+          Statement:
+            - Effect: Allow
+              Action:
+                - "cloudwatch:*"
+                - "logs:*"
+                - "lambda:InvokeFunction"
+                - "events:PutEvents"
+              Resource: "*"
+
+### Notifications
+  #SNS Topic
+  OrdersSNS:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: OrdersSNS
+
+### Roles & Policies
+
+  EventBridgeIAMrole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                !Sub events.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: PutEventsDestinationBus
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - states:StartExecution
+                Resource:
+                  - !GetAtt PaymentStateMachine.Arn
+
+  FulfillmentEventBridgeRuleInvokeLambda:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref FulfillmentService
+      Action: "lambda:InvokeFunction"
+      Principal: "events.amazonaws.com"
+      SourceArn: !GetAtt FulfillmentEventRule.Arn
+
+  CancelOrderEventBridgeRuleInvokeLambda:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref OrderCancellationService
+      Action: "lambda:InvokeFunction"
+      Principal: "events.amazonaws.com"
+      SourceArn: !GetAtt CancelOrderEventRule.Arn
